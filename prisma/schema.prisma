@@ -1,0 +1,21 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model GasCache {
+  id       Int      @id @default(autoincrement())
+  address  String
+  dateStr  String
+  txCount  Int
+  feeUsdt  String
+  feeRmb   String
+  updatedAt DateTime @updatedAt
+
+  @@unique([address, dateStr])
+  @@map("GasCache")
+}
