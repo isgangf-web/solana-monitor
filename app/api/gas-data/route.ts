@@ -17,23 +17,23 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // 查询 GasCache 表中该地址下，dateStr 字段以该 month 开头的所有数据
+    // 使用 Prisma 查询数据库
     const gasData = await prisma.gasCache.findMany({
       where: {
         address,
         dateStr: {
-          startsWith: month,
-        },
-      },
+          startsWith: month
+        }
+      }
     });
 
-    // 将返回的数据数组转化为一个以 dateStr 为 key 的字典对象
-    const result: Record<string, { txCount: number; feeUsdt: string; feeRmb: string }> = {};
-    gasData.forEach((item) => {
+    // 转换为以 dateStr 为 key 的字典对象
+    const result: Record<string, { tx_count: number; fee_usdt: string; fee_rmb: string }> = {};
+    gasData.forEach((item: { dateStr: string; txCount: number; feeUsdt: string; feeRmb: string }) => {
       result[item.dateStr] = {
-        txCount: item.txCount,
-        feeUsdt: item.feeUsdt,
-        feeRmb: item.feeRmb,
+        tx_count: item.txCount,
+        fee_usdt: item.feeUsdt,
+        fee_rmb: item.feeRmb
       };
     });
 
@@ -62,26 +62,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 使用 Prisma 的 upsert 方法：查询条件为组合的 address_dateStr
+    // 使用 Prisma 的 upsert 方法保存数据
     await prisma.gasCache.upsert({
       where: {
         address_dateStr: {
           address,
-          dateStr: date,
-        },
+          dateStr: date
+        }
       },
       update: {
         txCount,
         feeUsdt,
         feeRmb,
+        updatedAt: new Date()
       },
       create: {
         address,
         dateStr: date,
         txCount,
         feeUsdt,
-        feeRmb,
-      },
+        feeRmb
+      }
     });
 
     // 返回 JSON 格式

@@ -1,16 +1,14 @@
-import { PrismaClient } from '../app/generated/prisma/client';
+import { PrismaClient } from '@prisma/client';
 
-// 为 PrismaClient 添加全局类型声明
-declare global {
-  var prisma: PrismaClient | undefined;
-}
+const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
-// 创建单例的 PrismaClient 实例
-const prisma = global.prisma || new PrismaClient();
+// 这种写法能防止 Next.js 热更新导致数据库连接爆满
+export const prisma =
+  globalForPrisma.prisma ||
+  new PrismaClient({
+    log: ['query'], // 开启后，你能在终端直接看到 SQL 语句
+  });
 
-// 在非生产环境中，将实例存储在全局变量中
-if (process.env.NODE_ENV !== 'production') {
-  global.prisma = prisma;
-}
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
 
 export default prisma;
