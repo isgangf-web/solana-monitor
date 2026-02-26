@@ -8,8 +8,7 @@ interface DayData {
   date: string;
   txCount: number;
   isSynced: boolean;
-  feeUsdt: string;
-  feeRmb: string;
+  totalGasUsd: number;
 }
 
 interface SignatureRecord {
@@ -20,13 +19,10 @@ interface SignatureRecord {
 
 interface DbDayRecord {
   tx_count: number;
-  fee_usdt: string;
-  fee_rmb: string;
+  total_gas_usd: number;
 }
 
-// 本地后端 API 地址
-const DEFAULT_RPC = 'https://mainnet.helius-rpc.com/?api-key=93f747fb-101a-420c-b620-fd9b7d341ca1';
-const MAX_MONTH_TXS = 3000;
+
 
 export default function App() {
   const [address, setAddress] = useState<string>('');
@@ -34,13 +30,9 @@ export default function App() {
   
   // 核心数据状态
   const [monthData, setMonthData] = useState<DayData[]>([]);  
-  const [monthSignatures, setMonthSignatures] = useState<SignatureRecord[]>([]);  
   const [selectedDay, setSelectedDay] = useState<DayData | null>(null);  
-  const [monthlyKlines, setMonthlyKlines] = useState<any[][] | null>(null);  
-  const [exchangeRates, setExchangeRates] = useState({ usdToCny: 7.25, solUsd: 85 });
 
   const [loading, setLoading] = useState<boolean>(false);
-  const [calcLoading, setCalcLoading] = useState<boolean>(false);  
   const [progressMsg, setProgressMsg] = useState<string>('');
   const [error, setError] = useState<string>('');
 
@@ -62,76 +54,9 @@ export default function App() {
     return days;
   };
 
-  const callRpc = async (url: string, method: string, params: any[], retries = 3): Promise<any> => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.error) throw new Error(data.error.message);
-          return data.result;
-        }
-        if (res.status === 429) {
-          await new Promise(r => setTimeout(r, 800 * (i + 1)));  
-          continue;
-        }
-        throw new Error(`HTTP ${res.status}`);
-      } catch (err: any) {
-        if (i === retries - 1) throw err;
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-  };
-
-  const callRpcBatch = async (url: string, method: string, paramsArray: any[][]): Promise<any[]> => {
-    const promises = paramsArray.map(async (params, index) => {
-      for (let i = 0; i < 3; i++) {
-        try {
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: index, method, params })
-          });
-          if (res.ok) return await res.json();
-          if (res.status === 429) {
-            await new Promise(r => setTimeout(r, 800 * (i + 1)));
-            continue;
-          }
-          return { error: { message: `HTTP ${res.status}` } };
-        } catch (err: any) {
-          if (i === 2) return { error: { message: err.message } };
-        }
-      }
-      return { error: { message: '节点限流' } };
-    });
-    return await Promise.all(promises);
-  };
 
 
 
-  // 从本地存储中获取数据
-  const getLocalStorageData = (): Record<string, Record<string, { tx_count: number; fee_usdt: string; fee_rmb: string }>> => {
-    try {
-      const data = localStorage.getItem('solana_gas_data');
-      return data ? JSON.parse(data) : {};
-    } catch (err) {
-      console.warn('读取本地存储失败:', err);
-      return {};
-    }
-  };
-
-  // 保存数据到本地存储
-  const saveLocalStorageData = (data: Record<string, Record<string, { tx_count: number; fee_usdt: string; fee_rmb: string }>>) => {
-    try {
-      localStorage.setItem('solana_gas_data', JSON.stringify(data));
-    } catch (err) {
-      console.warn('保存本地存储失败:', err);
-    }
-  };
 
   const handleLoadMonth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -146,117 +71,34 @@ export default function App() {
     setSelectedDay(null);
 
     try {
+      setProgressMsg('正在从数据库和链上获取数据...');
+      
+      // 调用 API 获取数据
+      const response = await fetch(`/api/gas-data?address=${address}&month=${targetMonth}`);
+      const result = await response.json();
+      
+      if (!result.success) {
+        setError(result.error || '获取数据失败');
+        return;
+      }
+      
+      const data = result.data;
       const days = getDaysInMonth(targetMonth);
-      const startTimestamp = Math.floor(new Date(`${days[0]}T00:00:00`).getTime() / 1000);
-      const endTimestamp = Math.floor(new Date(`${days[days.length-1]}T23:59:59`).getTime() / 1000);
-
-      setProgressMsg('正在同步法币汇率与整月 K 线...');
-      let rates = { usdToCny: 7.25, solUsd: 85 };
-      try {
-        const [fiatRes, jupRes] = await Promise.all([
-          fetch('https://open.er-api.com/v6/latest/USD').catch(() => null),
-          fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd').catch(() => null)
-        ]);
-        if (fiatRes) {
-          const fiatData = await fiatRes.json();
-          if (fiatData?.rates?.CNY) rates.usdToCny = fiatData.rates.CNY;
-        }
-        if (jupRes) {
-           const jupData = await jupRes.json();
-           if (jupData?.solana?.usd) rates.solUsd = jupData.solana.usd;
-        }
-      } catch (err) { /* ignore */ }
-      setExchangeRates(rates);
-
-      try {
-        const binanceUrl = `https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=1h&startTime=${startTimestamp * 1000}&endTime=${endTimestamp * 1000}`;
-        const binanceRes = await fetch(binanceUrl);
-        if (binanceRes.ok) setMonthlyKlines(await binanceRes.json());
-      } catch (err) {
-        console.warn('币安历史K线获取失败');
-      }
-
-      setProgressMsg('正在扫描链上本月交易...');
-      let allSignatures: SignatureRecord[] = [];
-      let lastSignature: string | null = null;
-      let reachedEnd = false;
-
-      while (!reachedEnd && allSignatures.length < MAX_MONTH_TXS) {
-        const params: any[] = [address, { limit: 1000, ...(lastSignature ? { before: lastSignature } : {}) }];
-        const sigs = await callRpc(DEFAULT_RPC, 'getSignaturesForAddress', params);
-        
-        if (!sigs || sigs.length === 0) break;
-
-        for (const sig of sigs) {
-          const txTime = sig.blockTime;
-          if (!txTime) continue;
-          if (txTime < startTimestamp) {
-            reachedEnd = true;
-            break;
-          }
-          if (txTime <= endTimestamp && txTime >= startTimestamp) {
-            const offset = new Date(txTime * 1000).getTimezoneOffset() * 60000;
-            const localDate = (new Date(txTime * 1000 - offset)).toISOString().split('T')[0];
-            allSignatures.push({ signature: sig.signature, blockTime: txTime, localDate });
-          }
-        }
-        lastSignature = sigs[sigs.length - 1].signature;
-        if (sigs.length < 1000) break;
-      }
       
-      setMonthSignatures(allSignatures);
-
-      const chainCounts: Record<string, number> = {};
-      days.forEach(d => chainCounts[d] = 0);
-      allSignatures.forEach(sig => {
-        if (chainCounts[sig.localDate] !== undefined) {
-          chainCounts[sig.localDate]++;
-        }
-      });
-
-      setProgressMsg('正在校验本地缓存...');
-      const finalMonthData: DayData[] = [];
-      
-      // 从本地存储中获取数据
-      const localData = getLocalStorageData();
-      const addressData = localData[address] || {};
-
-      days.forEach((dayStr) => {
-        const chainCount = chainCounts[dayStr];
-        const dbSnap = addressData[dayStr];
-        let isSynced = false;
-        let feeUsdt = '0.000000';
-        let feeRmb = '0.000';
-
-        if (dbSnap) {
-          // 如果链上抓出来的笔数和本地存储存的一模一样，说明不需要再查 RPC
-          if (dbSnap.tx_count === chainCount) {
-            isSynced = true;
-            feeUsdt = dbSnap.fee_usdt;
-            feeRmb = dbSnap.fee_rmb;
-          }
-        }
-
-        finalMonthData.push({
+      // 构建月度数据
+      const finalMonthData: DayData[] = days.map(dayStr => {
+        const dayData = data[dayStr];
+        return {
           date: dayStr,
-          txCount: chainCount,
-          isSynced: chainCount === 0 ? true : isSynced, 
-          feeUsdt: isSynced ? feeUsdt : '0.000000',
-          feeRmb: isSynced ? feeRmb : '0.000'
-        });
+          txCount: dayData ? dayData.tx_count : 0,
+          isSynced: dayData ? true : false,
+          totalGasUsd: dayData ? dayData.total_gas_usd : 0
+        };
       });
 
       setMonthData(finalMonthData);
       const firstActive = finalMonthData.find(d => d.txCount > 0);
       setSelectedDay(firstActive || finalMonthData[finalMonthData.length - 1]);
-      
-      // 保存所有从链上获取的数据到本地存储
-      // 为了避免性能问题，我们先保存第一笔有交易但未同步的数据
-      const firstUnsynced = finalMonthData.find(d => d.txCount > 0 && !d.isSynced);
-      if (firstUnsynced) {
-        // 计算手续费并保存
-        handleCalculateDay(firstUnsynced);
-      }
 
     } catch (err: any) {
       setError(err.message || '获取月度数据失败，请重试');
@@ -266,106 +108,25 @@ export default function App() {
     }
   };
 
-  const handleCalculateDay = async (dayObj: DayData) => {
-    setCalcLoading(true);
-    setProgressMsg('正在精准解析当日手续费...');
-    
-    try {
-      const daySigs = monthSignatures.filter(s => s.localDate === dayObj.date);
-      let totalFeeUsdt = 0;
-      const batchSize = 5; 
-      
-      for (let i = 0; i < daySigs.length; i += batchSize) {
-        const batchSigs = daySigs.slice(i, i + batchSize);
-        const paramsArray = batchSigs.map(sig => [
-          sig.signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }
-        ]);
 
-        try {
-          const responses = await callRpcBatch(DEFAULT_RPC, 'getTransaction', paramsArray);
-          for (const res of responses) {
-            if (res.error || !res.result) continue;
-            
-            if (res.result.meta && res.result.meta.fee) {
-              const feeSol = res.result.meta.fee / 1e9;
-              const txTimeSec = res.result.blockTime;
-              
-              let priceAtTxTime = exchangeRates.solUsd;
-              if (monthlyKlines && monthlyKlines.length > 0 && txTimeSec) {
-                const txTimeMs = txTimeSec * 1000;
-                for (const k of monthlyKlines) {
-                  if (txTimeMs >= k[0] && txTimeMs <= k[6]) {
-                    priceAtTxTime = (parseFloat(k[1]) + parseFloat(k[4])) / 2;
-                    break;
-                  }
-                }
-              }
-              totalFeeUsdt += (feeSol * priceAtTxTime);
-            }
-          }
-        } catch (batchErr) {
-          console.warn("批次跳过", batchErr);
-        }
-
-        setProgressMsg(`解析中 (${Math.min(i + batchSize, daySigs.length)} / ${daySigs.length})...`);
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
-
-      const totalFeeRmb = totalFeeUsdt * exchangeRates.usdToCny;
-      const finalUsdtStr = totalFeeUsdt.toFixed(6);
-      const finalRmbStr = totalFeeRmb.toFixed(3);
-
-      // 保存数据到本地存储
-      try {
-        const localData = getLocalStorageData();
-        if (!localData[address]) {
-          localData[address] = {};
-        }
-        localData[address][dayObj.date] = {
-          tx_count: dayObj.txCount,
-          fee_usdt: finalUsdtStr,
-          fee_rmb: finalRmbStr
-        };
-        saveLocalStorageData(localData);
-      } catch (err) {
-        console.warn("保存到本地存储失败", err);
-      }
-
-      const updatedData = monthData.map(d => 
-        d.date === dayObj.date 
-          ? { ...d, isSynced: true, feeUsdt: finalUsdtStr, feeRmb: finalRmbStr } 
-          : d
-      );
-      setMonthData(updatedData);
-      setSelectedDay(updatedData.find(d => d.date === dayObj.date) || null);
-
-    } catch (err: any) {
-      alert('计算失败: ' + err.message);
-    } finally {
-      setCalcLoading(false);
-      setProgressMsg('');
-    }
-  };
 
   const maxTxCount = useMemo(() => {
     return monthData.reduce((max, day) => Math.max(max, day.txCount), 0) || 1;
   }, [monthData]);
 
   const monthlyTotals = useMemo(() => {
-    let sumUsdt = 0;
-    let sumRmb = 0;
+    let sumGasUsd = 0;
     let syncedDays = 0;
     let totalActiveDays = 0;
 
     monthData.forEach(d => {
       if (d.txCount > 0) totalActiveDays++;
       if (d.isSynced && d.txCount > 0) {
-        sumUsdt += parseFloat(d.feeUsdt);
-        sumRmb += parseFloat(d.feeRmb);
+        sumGasUsd += d.totalGasUsd;
         syncedDays++;
       }
     });
-    return { sumUsdt: sumUsdt.toFixed(4), sumRmb: sumRmb.toFixed(2), syncedDays, totalActiveDays };
+    return { sumGasUsd: sumGasUsd.toFixed(2), syncedDays, totalActiveDays };
   }, [monthData]);
 
   return (
@@ -451,7 +212,6 @@ export default function App() {
               <div className="mb-6">
                 <h3 className="text-xs font-semibold text-slate-500 mb-3 uppercase tracking-wider flex justify-between">
                   <span>{targetMonth} 每日活跃度</span>
-                  <span>单月扫描上限: {MAX_MONTH_TXS} 笔</span>
                 </h3>
                 
                 <div className="h-32 flex items-end gap-[2px] border-b border-slate-200 pb-1 px-1">
@@ -504,40 +264,28 @@ export default function App() {
                         {selectedDay.isSynced ? (
                           <div className="flex flex-col gap-1">
                             <div className="flex items-baseline gap-1">
-                              <span className="text-3xl font-bold text-slate-800">{selectedDay.feeUsdt}</span>
-                              <span className="text-xs font-bold text-slate-500">USDT</span>
+                              <span className="text-3xl font-bold text-slate-800">{selectedDay.totalGasUsd.toFixed(2)}</span>
+                              <span className="text-xs font-bold text-slate-500">USD</span>
                             </div>
-                            <span className="text-xs text-slate-500">≈ {selectedDay.feeRmb} RMB</span>
+                            <span className="text-xs text-slate-500">当日总 Gas 消耗</span>
                           </div>
                         ) : (
                           <div className="text-sm text-orange-600 font-medium">
-                            检测到未缓存的新交易，请重新计算差额。
+                            数据正在同步中...
                           </div>
                         )}
                       </div>
-
-                      {!selectedDay.isSynced && (
-                        <button
-                          onClick={() => handleCalculateDay(selectedDay)}
-                          disabled={calcLoading}
-                          className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg text-sm font-medium transition-colors shadow-sm disabled:opacity-70 flex items-center"
-                        >
-                          {calcLoading ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Database className="w-4 h-4 mr-1" />}
-                          {calcLoading ? '计算中...' : '计算当日并存档'}
-                        </button>
-                      )}
                     </div>
                   )}
-                  {calcLoading && progressMsg && <p className="text-[10px] text-orange-600 mt-2 text-right">{progressMsg}</p>}
                 </div>
               )}
 
               <div className="mt-6 pt-5 border-t border-slate-100 flex justify-between items-center">
                 <div>
-                  <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">本月账单总计 (基于已存档天数)</h4>
+                  <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">本月 Gas 总计 (基于已同步天数)</h4>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-black text-purple-700">{monthlyTotals.sumUsdt}</span>
-                    <span className="text-xs font-bold text-slate-400">USDT</span>
+                    <span className="text-2xl font-black text-purple-700">{monthlyTotals.sumGasUsd}</span>
+                    <span className="text-xs font-bold text-slate-400">USD</span>
                   </div>
                 </div>
                 <div className="text-right">
@@ -546,7 +294,7 @@ export default function App() {
                   </p>
                   {monthlyTotals.syncedDays < monthlyTotals.totalActiveDays && (
                     <p className="text-[10px] text-orange-500 bg-orange-50 px-2 py-1 rounded">
-                      部分天数未归档，总额不完整
+                      部分天数未同步，总额不完整
                     </p>
                   )}
                 </div>

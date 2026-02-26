@@ -9,14 +9,14 @@ datasource db {
 }
 
 model GasCache {
-  id       Int      @id @default(autoincrement())
-  address  String
-  dateStr  String
-  txCount  Int
-  feeUsdt  String
-  feeRmb   String
-  updatedAt DateTime @updatedAt
+  id          Int      @id @default(autoincrement())
+  walletAddress String  // 钱包地址
+  date        String  // 日期，YYYY-MM-DD 格式
+  txCount     Int     // 交易笔数
+  totalGasFee String  // 消耗的 Gas 总和，单位 SOL
+  totalGasUsd Float   // 消耗的 Gas 总和，单位 USD
+  updatedAt   DateTime @updatedAt
 
-  @@unique([address, dateStr])
+  @@unique([walletAddress, date])
   @@map("GasCache")
 }
